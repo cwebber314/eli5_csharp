@@ -1,0 +1,18 @@
+# Core RAG ingestion stack (offline)
+langchain>=0.3.0
+langchain-community>=0.3.0
+langchain-huggingface>=0.1.0
+langchain-chroma>=0.1.4
+chromadb>=0.5.0
+
+# Embedding model runtime (bge-small runs on sentence-transformers)
+sentence-transformers>=3.0.0
+torch>=2.2.0
+
+# Progress bars during ingestion
+tqdm>=4.66.0
+
+# Generation step
+langchain-ollama>=0.2.0     # ChatOllama (default backend)
+gradio>=6.0             # web chat UI (app.py)
+# llama-cpp-python>=0.3.0   # optional: LLM_BACKEND=llamacpp (in-process GGUF)

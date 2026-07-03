@@ -1,0 +1,24 @@
+# Ollama Modelfile — registers your LOCAL Qwen3-Coder GGUF without re-downloading.
+#
+# Build it once:
+#   ollama create qwen3-coder -f Modelfile
+#
+# Then run the pipeline with LLM_BACKEND=ollama (the default) and
+# OLLAMA_MODEL=qwen3-coder (also the default).
+
+# Reuse the GGUF already on disk (relative to this Modelfile).
+FROM ./models/qwen3-coder-gguf/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf
+
+# --- Sampling (Qwen3-Coder-Instruct recommended defaults) --------------------
+# Our Python code passes temperature/num_ctx per request, which override these;
+# they act as sensible fallbacks if the model is used directly (e.g. `ollama run`).
+PARAMETER temperature 0.7
+PARAMETER top_p 0.8
+PARAMETER top_k 20
+PARAMETER repeat_penalty 1.05
+
+# --- Context window ----------------------------------------------------------
+# CRITICAL: Ollama defaults to 4096 and will silently truncate retrieved chunks.
+# Keep this generous for RAG. (Python overrides via num_ctx too, but set a safe
+# default here for direct `ollama run` use.)
+PARAMETER num_ctx 16384
