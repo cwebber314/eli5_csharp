@@ -7,7 +7,7 @@ Retrieval lives in retrieve.py / rag.py; generation in the chat front-ends.
 
 Usage:
     python ingest.py --source path/to/csharp/repo
-    python ingest.py --source ./repos/mathnet-numerics --reset
+    python ingest.py --source ./repos/quikgraph/src --reset
 
 Everything runs fully offline: the embedding model is read from ./models.
 """
@@ -27,12 +27,36 @@ from langchain_text_splitters import Language, RecursiveCharacterTextSplitter
 
 HERE = Path(__file__).resolve().parent
 
-# Local, offline embedding model (already downloaded under ./models).
-EMBED_MODEL_PATH = HERE / "models" / "bge-small-en-v1.5"
+# Selectable offline embedding models (folders under ./models). Switch with the
+# EMBED_MODEL env var. Each entry carries its document/query prompts (models use
+# different prefix conventions) and whether it needs remote code.
+EMBED_MODELS = {
+    "bge-small": {
+        "path": HERE / "models" / "bge-small-en-v1.5",
+        # BGE: no document prefix; retrieval instruction on the query side only.
+        "doc_prompt": None,
+        "query_prompt": "Represent this sentence for searching relevant passages: ",
+        "trust_remote_code": False,
+    },
+    "modernbert": {
+        "path": HERE / "models" / "modernbert-embed-base",
+        # nomic-style task prefixes -- documents and queries use DIFFERENT ones.
+        "doc_prompt": "search_document: ",
+        "query_prompt": "search_query: ",
+        "trust_remote_code": False,  # ModernBERT is native to transformers 5.x
+    },
+}
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "bge-small").lower()
 
-# Where Chroma persists its data on disk.
+# Where Chroma persists its data on disk. Different models produce different-
+# dimension vectors that CANNOT share a collection, so each model gets its own.
+# bge-small keeps the original name for backward compatibility with existing
+# stores; retrieve.py / rag.py import COLLECTION_NAME, so setting EMBED_MODEL
+# consistently for ingest and querying keeps them matched.
 CHROMA_DIR = HERE / "chroma_db"
-COLLECTION_NAME = "csharp_code"
+COLLECTION_NAME = (
+    "csharp_code" if EMBED_MODEL == "bge-small" else f"csharp_code_{EMBED_MODEL}"
+)
 
 # Chunking. C#-aware splitting keeps methods/classes together where possible.
 # ~1000 chars with overlap is a reasonable starting point for code RAG.
@@ -109,40 +133,60 @@ def chunk_documents(docs: list[Document]) -> list[Document]:
 # --- Embedding + storage -----------------------------------------------------
 
 def build_embedder() -> HuggingFaceEmbeddings:
-    """Load bge-small from the local folder.
+    """Load the selected embedding model (EMBED_MODEL) from its local folder.
 
-    BGE recommends normalized embeddings, and a query-side instruction for
-    retrieval. The deprecated HuggingFaceBgeEmbeddings did the instruction
-    automatically; here we reproduce it explicitly via query_encode_kwargs'
-    `prompt` (documents get no instruction, queries do -- so a store built by
-    the old class stays compatible)."""
-    if not EMBED_MODEL_PATH.exists():
-        raise FileNotFoundError(f"Embedding model not found at {EMBED_MODEL_PATH}")
+    Each model gets its document/query prompts from the registry (BGE prefixes
+    queries only; modernbert prefixes both with nomic-style tags). Normalized
+    embeddings so cosine similarity is clean. A store built by one model is not
+    compatible with another -- each model uses its own Chroma collection."""
+    if EMBED_MODEL not in EMBED_MODELS:
+        raise ValueError(
+            f"Unknown EMBED_MODEL={EMBED_MODEL!r}. Choose from {list(EMBED_MODELS)}."
+        )
+    cfg = EMBED_MODELS[EMBED_MODEL]
+    path = cfg["path"]
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Embedding model '{EMBED_MODEL}' not found at {path}. "
+            "See the README for the download command."
+        )
     # Force offline so HF never tries to reach the network.
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
+    # Documents: normalize + batch, plus a document prefix if the model uses one.
+    encode_kwargs = {"normalize_embeddings": True, "batch_size": BATCH_SIZE}
+    if cfg["doc_prompt"]:
+        encode_kwargs["prompt"] = cfg["doc_prompt"]
+    # Queries: normalize, plus the model's retrieval prompt if it has one.
+    query_encode_kwargs = {"normalize_embeddings": True}
+    if cfg["query_prompt"]:
+        query_encode_kwargs["prompt"] = cfg["query_prompt"]
+
     return HuggingFaceEmbeddings(
-        model_name=str(EMBED_MODEL_PATH),
-        model_kwargs={"device": "cpu"},
-        # Documents: normalize, batch, no instruction.
-        encode_kwargs={"normalize_embeddings": True, "batch_size": BATCH_SIZE},
-        # Queries: same, plus BGE's retrieval instruction prompt.
-        query_encode_kwargs={
-            "normalize_embeddings": True,
-            "prompt": "Represent this sentence for searching relevant passages: ",
-        },
+        model_name=str(path),
+        model_kwargs={"device": "cpu", "trust_remote_code": cfg["trust_remote_code"]},
+        encode_kwargs=encode_kwargs,
+        query_encode_kwargs=query_encode_kwargs,
     )
 
 
 def ingest(source: Path, reset: bool) -> None:
     print(f"Source repo : {source}")
     print(f"Chroma dir  : {CHROMA_DIR}")
-    print(f"Embed model : {EMBED_MODEL_PATH}\n")
+    print(f"Embed model : {EMBED_MODEL} ({EMBED_MODELS[EMBED_MODEL]['path']})")
+    print(f"Collection  : {COLLECTION_NAME}\n")
 
     if reset and CHROMA_DIR.exists():
-        import shutil
-        print("Resetting existing Chroma store...")
-        shutil.rmtree(CHROMA_DIR)
+        # Reset only THIS model's collection, so an A/B against another model's
+        # collection in the same store isn't destroyed.
+        import chromadb
+        client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+        try:
+            client.delete_collection(COLLECTION_NAME)
+            print(f"Reset collection '{COLLECTION_NAME}'.")
+        except Exception as exc:
+            print(f"Nothing to reset for '{COLLECTION_NAME}' ({exc}).")
 
     print("Loading C# files...")
     docs = load_documents(source)
@@ -199,7 +243,7 @@ def main() -> None:
     parser.add_argument(
         "--source",
         type=Path,
-        default=HERE / "repos" / "mathnet-numerics",
+        default=HERE / "repos" / "quikgraph" / "src",
         help="Path to the C# repository to ingest.",
     )
     parser.add_argument(

@@ -62,7 +62,7 @@ QUERYING  (per question — rag.py orchestrates)
 | `chat.py` | Front-ends 2 & 3 — terminal REPL with session memory + history-aware retrieval. |
 | `app.py` | Front-end 4 — Gradio web chat with a cited-source code viewer. |
 | `Modelfile` | Registers a local GGUF into Ollama without re-downloading. |
-| `models/` | Local weights: `bge-small` embedder + Qwen GGUF(s). |
+| `models/` | Local weights: `bge-small` / `modernbert` embedders + Qwen GGUF(s). |
 | `chroma_db/` | Persisted vector store (created by `ingest.py`). |
 | `repos/` | The C# source you ingest. |
 
@@ -71,9 +71,19 @@ reuses `ingest.py`'s embedder + Chroma for retrieval — one core, four faces.
 
 ## Download offline models
 
+Download the ingest models like this:
 ```sh
 pip install hf
 hf download BAAI/bge-small-en-v1.5 --local-dir ./models/bge-small-en-v1.5
+hf download nomic-ai/modernbert-embed-base --local-dir ./models/modernbert-embed-base
+```
+
+These include the pytorch model and safetensors model. You can delete the pytorch model if you want to save disk space
+for whatever reason - they are the same model in a different format. 
+
+
+And the LLM models:
+```sh
 hf download unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF --local-dir ./models/qwen3-coder-gguf --include "*Q4_K_M*"
 hf download bartowski/Qwen2.5-Coder-7B-Instruct-GGUF --local-dir ./models/qwen2.5-coder-7b-gguf --include "*Q4_K_M.gguf"
 ```
@@ -93,15 +103,39 @@ You can download the windows zip here if you don't want to run an installer [lin
 ## Get a sample C# repo
 
 ```bash
-git clone --depth 1 https://github.com/mathnet/mathnet-numerics.git repos/mathnet-numerics
 git clone --depth 1 https://github.com/KeRNeLith/QuikGraph.git repos/quikgraph
 ```
 
 ## Ingest
 
 ```bash
-python ingest.py --source repos/mathnet-numerics --reset
+python ingest.py --source repos/quikgraph/src --reset
 ```
+
+### Choosing the embedding model
+
+Two embedders are available; switch with the `EMBED_MODEL` env var (default
+`bge-small`). Each gets its own Chroma collection, so you can build both and
+A/B them without clobbering the other.
+
+| `EMBED_MODEL` | Model | Dim | Context |
+|---------------|-------|-----|---------|
+| `bge-small` (default) | `bge-small-en-v1.5` | 384 | 512 tok |
+| `modernbert` | `nomic-ai/modernbert-embed-base` | 768 | 8192 tok |
+
+```powershell
+# Build a second store with modernbert (the bge store is left untouched)
+$env:EMBED_MODEL = "modernbert"
+python ingest.py --source repos/quikgraph/src --reset
+
+# Compare retrieval between the two on the same query
+python retrieve.py "how do I export to graphviz" --k 5
+$env:EMBED_MODEL = "bge-small"
+python retrieve.py "how do I export to graphviz" --k 5
+```
+
+Set `EMBED_MODEL` consistently for ingest **and** querying — it selects both the
+embedder and the matching collection.
 
 ## Sanity-check the store
 
@@ -111,7 +145,7 @@ python ingest.py --query "how do I export to graphviz"
 
 ## Retrieve
 
-`retrieve.py` embeds your query with the same offline bge-small model and prints
+`retrieve.py` embeds your query with the same offline embedding model and prints
 the nearest code chunks, each with a normalized relevance score (0–1), its source
 file, and its chunk index — so you can see exactly *what* the vector search found
 before any LLM is involved.
@@ -135,8 +169,8 @@ Things to try to build intuition:
 
 - Vary `--k` and watch where the scores fall off — that cliff hints at how many
   chunks are actually relevant vs. padding.
-- Compare a precise query (`"Cholesky decomposition"`) with a vague one
-  (`"do math"`) and watch the scores drop.
+- Compare a precise query (`"minimum spanning tree algorithm"`) with a vague one
+  (`"do stuff with nodes"`) and watch the scores drop.
 - Note when several near-duplicate chunks come from the same file — that's the
   pain MMR-based retrieval would solve later.
 
