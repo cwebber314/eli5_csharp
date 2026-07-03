@@ -6,16 +6,68 @@ codebase, running **fully offline**.
 - **Embeddings:** `bge-small-en-v1.5` (local, in `models/`)
 - **Vector store:** Chroma (persisted to `chroma_db/`)
 - **Framework:** LangChain
-- **Generation (later step):** `qwen3-coder` GGUF (already in `models/`)
+- **Generation:** Qwen2.5-Coder-7B GGUF via Ollama (default; `qwen3-coder` 30B also supported)
 
 ## Pipeline steps
 
 1. **Ingest** (this repo, done) — load C# files, chunk them C#-aware, embed with
    bge-small, store in Chroma.
 2. **Retrieve** (done) — query the store for relevant code chunks.
-3. **Generate** (done) — feed retrieved chunks + question to Qwen3-Coder for
+3. **Generate** (done) — feed retrieved chunks + question to Qwen for
    answers, via four front-ends (one-shot CLI, terminal chat, history-aware
    chat, Gradio web UI).
+
+## Architecture
+
+Two phases. **Indexing** runs once per repo to build the vector store;
+**querying** runs on every question. The embedding model is shared by both, so
+questions and code land in the same vector space.
+
+```
+INDEXING  (run once per repo — ingest.py)
+
+   repos/*.cs ─► load ─► C#-aware chunk ─► embed (bge-small) ─► Chroma
+   (source)                                                    (chroma_db/)
+
+
+QUERYING  (per question — rag.py orchestrates)
+
+   question
+      │
+      ▼  (chat.py / app.py only, if prior turns exist)
+   history-aware rewrite ──────────┐
+      │                            │
+      ▼                            ▼
+   embed query (bge-small) ─► Chroma similarity search ─► top-k code chunks
+                                                               │
+                                     build grounded prompt ◄───┘
+                                     (system + context + question)
+                                               │
+                                               ▼  llm.py
+                                     Qwen  (via Ollama)
+                                               │
+                                               ▼
+                                     answer + cited source files
+```
+
+### Module map
+
+| File | Role |
+|------|------|
+| `ingest.py` | Indexing: load → chunk → embed → store. Also exposes `build_embedder()`, reused everywhere so retrieval matches ingestion. |
+| `retrieve.py` | Inspect retrieval alone (scores + sources), no LLM — the debugging lens for the vector search. |
+| `rag.py` | Shared RAG core: `answer()` / `stream_answer()`, prompt templates, history-aware query rewriting. |
+| `llm.py` | Model factory — builds the Ollama chat model and holds sampling config. |
+| `generate.py` | Front-end 1 — one-shot CLI, no memory. |
+| `chat.py` | Front-ends 2 & 3 — terminal REPL with session memory + history-aware retrieval. |
+| `app.py` | Front-end 4 — Gradio web chat with a cited-source code viewer. |
+| `Modelfile` | Registers a local GGUF into Ollama without re-downloading. |
+| `models/` | Local weights: `bge-small` embedder + Qwen GGUF(s). |
+| `chroma_db/` | Persisted vector store (created by `ingest.py`). |
+| `repos/` | The C# source you ingest. |
+
+All three chat front-ends call `rag.py`, which calls `llm.py` for generation and
+reuses `ingest.py`'s embedder + Chroma for retrieval — one core, four faces.
 
 ## Download offline models
 
@@ -23,6 +75,7 @@ codebase, running **fully offline**.
 pip install hf
 hf download BAAI/bge-small-en-v1.5 --local-dir ./models/bge-small-en-v1.5
 hf download unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF --local-dir ./models/qwen3-coder-gguf --include "*Q4_K_M*"
+hf download bartowski/Qwen2.5-Coder-7B-Instruct-GGUF --local-dir ./models/qwen2.5-coder-7b-gguf --include "*Q4_K_M.gguf"
 ```
 
 ## Setup
@@ -89,42 +142,25 @@ Things to try to build intuition:
 
 ## Generate (chat with the codebase)
 
-The generation step turns retrieved chunks into plain-language answers using the
-local Qwen3-Coder model. All four front-ends share one RAG core (`rag.py`) and
-one engine factory (`llm.py`).
+The generation step turns retrieved chunks into plain-language answers using a
+local Qwen model served by Ollama. All four front-ends share one RAG core
+(`rag.py`) and one engine factory (`llm.py`).
 
-### Pick an inference engine
+### Set up the model in Ollama
 
-You can check that the env is setup right:
-```sh
-where cl
-```
-
-Set `LLM_BACKEND` (default `ollama`):
-```sh
-# Option A: Ollama (default). Import your existing GGUF once, no re-download:
-ollama create qwen3-coder -f Modelfile
-SET LLM_BACKEND=ollama
-```
-
-If you use llama-cpp you have to setup the build chain.  Maybe just use Option A
-
-Make sure you install vs build toold 2022 first from [here](https://aka.ms/vs/17/release/vs_buildtools.exe)
-Then install "Desktop Development with C++".
-
-Make sure your environment is setup. You may need to run
-```
-"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-```
+Register the local GGUF with Ollama once (reuses the file, no re-download):
 
 ```sh
-# Option B: llama-cpp-python, loads the GGUF in-process (no server):
-pip install llama-cpp-python
-SET LLM_BACKEND=llamacpp
+ollama create qwen2.5-coder-7b -f Modelfile.7b
 ```
 
-Other env knobs: `LLM_TEMPERATURE` (default 0.2), `LLM_NUM_CTX` (default 16384),
-`OLLAMA_MODEL` (default `qwen3-coder`), `LLM_N_GPU_LAYERS` (llama.cpp, default -1).
+`llm.py` defaults to this model, so no environment variables are needed. Optional
+knobs: `OLLAMA_MODEL` (default `qwen2.5-coder-7b`), `LLM_TEMPERATURE` (default
+0.2), `LLM_NUM_CTX` (default 16384).
+
+> **Hardware note:** Qwen3-Coder-30B pushed past my 8 GB GPU / 16 GB free RAM, so
+> the default is the smaller Qwen2.5-Coder-7B, which fits entirely in VRAM. The
+> 30B `Modelfile` is still in the repo if your machine can handle it.
 
 ### The four front-ends
 

@@ -1,0 +1,2 @@
+FROM ./models/qwen2.5-coder-7b-gguf/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf
+PARAMETER num_ctx 16384

@@ -2,8 +2,8 @@
 Ingest a C# codebase into a local Chroma vector store using the offline
 bge-small-en-v1.5 embedding model.
 
-This is step 1 of a learning RAG pipeline: load -> chunk -> embed -> store.
-Retrieval / generation (with the local Qwen3-Coder model) come later.
+This is step 1 of the RAG pipeline: load -> chunk -> embed -> store.
+Retrieval lives in retrieve.py / rag.py; generation in the chat front-ends.
 
 Usage:
     python ingest.py --source path/to/csharp/repo
